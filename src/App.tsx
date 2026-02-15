@@ -1,6 +1,13 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  clearDiagramTokenFromUrl,
+  decodeDiagramToken,
+  encodeDiagramToken,
+  readDiagramTokenFromUrl,
+  writeDiagramTokenToUrl,
+} from "@/lib/share-link";
 import { cn } from "@/lib/utils";
 import { THEMES, renderMermaid, renderMermaidAscii, type ThemeName } from "beautiful-mermaid";
 import {
@@ -11,6 +18,7 @@ import {
   Download,
   Eye,
   FileImage,
+  Link2,
   Minus,
   MoonStar,
   Palette,
@@ -38,7 +46,7 @@ type DragState = {
 
 /* ─── Constants ─── */
 
-const MERMAID_THEME_BY_MODE = { light: "catppuccin-latte", dark: "catppuccin-mocha" } as const;
+const MERMAID_THEME_BY_MODE = { light: "github-light", dark: "github-dark" } as const;
 const PNG_SCALES = [1, 2, 8, 16] as const;
 const MIN_SCALE = 0.2;
 const MAX_SCALE = 16;
@@ -105,6 +113,15 @@ const DIAGRAM_PRESETS = {
 
 type DiagramPreset = keyof typeof DIAGRAM_PRESETS;
 const DEFAULT_PRESET: DiagramPreset = "Flowchart";
+const PRESET_SOURCES = new Set<string>(Object.values(DIAGRAM_PRESETS));
+
+async function buildShareUrlForSource(source: string, currentUrl: URL): Promise<URL> {
+  if (source.trim().length === 0 || PRESET_SOURCES.has(source)) {
+    return clearDiagramTokenFromUrl(currentUrl);
+  }
+  const token = await encodeDiagramToken(source);
+  return writeDiagramTokenToUrl(currentUrl, token);
+}
 
 /* ─── Utilities ─── */
 
@@ -235,6 +252,7 @@ export function App() {
   const [pngScale, setPngScale] = useState<(typeof PNG_SCALES)[number]>(2);
   const [activePreset, setActivePreset] = useState<DiagramPreset>(DEFAULT_PRESET);
   const [source, setSource] = useState<string>(DIAGRAM_PRESETS[DEFAULT_PRESET]);
+  const [hasHydratedShareLink, setHasHydratedShareLink] = useState(false);
 
   const [svgMarkup, setSvgMarkup] = useState("");
   const [asciiMarkup, setAsciiMarkup] = useState("");
@@ -281,6 +299,61 @@ export function App() {
       setActionError(false);
     }, 3000);
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    let isCancelled = false;
+    (async () => {
+      try {
+        const currentUrl = new URL(window.location.href);
+        const token = readDiagramTokenFromUrl(currentUrl);
+        if (!token) return;
+        const decoded = await decodeDiagramToken(token);
+        if (isCancelled) return;
+        setSource(decoded);
+
+        const canonicalUrl = writeDiagramTokenToUrl(currentUrl, token);
+        if (canonicalUrl.toString() !== currentUrl.toString()) {
+          window.history.replaceState(null, "", canonicalUrl);
+        }
+      } catch {
+        if (!isCancelled) {
+          showActionMessage("Invalid share link", true);
+        }
+      } finally {
+        if (!isCancelled) {
+          setHasHydratedShareLink(true);
+        }
+      }
+    })();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [showActionMessage]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !hasHydratedShareLink) return;
+
+    let isCancelled = false;
+    const timeout = setTimeout(() => {
+      void (async () => {
+        try {
+          const currentUrl = new URL(window.location.href);
+          const nextUrl = await buildShareUrlForSource(source, currentUrl);
+          if (!isCancelled && nextUrl.toString() !== currentUrl.toString()) {
+            window.history.replaceState(null, "", nextUrl);
+          }
+        } catch {}
+      })();
+    }, 350);
+
+    return () => {
+      isCancelled = true;
+      clearTimeout(timeout);
+    };
+  }, [hasHydratedShareLink, source]);
 
   const getRenderOptions = useCallback(
     () => ({ ...THEMES[mermaidTheme], font: "DM Sans", padding: 36 }),
@@ -502,6 +575,23 @@ export function App() {
     }
   }, [showActionMessage, source]);
 
+  const handleCopyShareLink = useCallback(async () => {
+    try {
+      if (typeof window === "undefined") {
+        throw new Error("Share links are only available in a browser.");
+      }
+      const currentUrl = new URL(window.location.href);
+      const shareUrl = await buildShareUrlForSource(source, currentUrl);
+      if (shareUrl.toString() !== currentUrl.toString()) {
+        window.history.replaceState(null, "", shareUrl);
+      }
+      await navigator.clipboard.writeText(shareUrl.toString());
+      showActionMessage("Share link copied");
+    } catch (error) {
+      showActionMessage(error instanceof Error ? error.message : String(error), true);
+    }
+  }, [showActionMessage, source]);
+
   const lineCount = source.split("\n").length;
   const isBusy = isRendering || exporting !== null;
   const isSvgReady = renderStyle === "svg" && !!svgMarkup;
@@ -543,6 +633,17 @@ export function App() {
               ))}
             </SelectContent>
           </Select>
+
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 gap-1.5 rounded-lg px-2.5 text-xs"
+            onClick={handleCopyShareLink}
+            title="Copy share link"
+          >
+            <Link2 className="size-3.5" />
+            <span className="hidden sm:inline">Share</span>
+          </Button>
 
           <Button
             variant="outline"
