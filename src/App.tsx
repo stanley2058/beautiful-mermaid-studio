@@ -40,7 +40,7 @@ import themeOneDarkPro from "shiki/themes/one-dark-pro.mjs";
 import themeSolarizedDark from "shiki/themes/solarized-dark.mjs";
 import themeSolarizedLight from "shiki/themes/solarized-light.mjs";
 import themeTokyoNight from "shiki/themes/tokyo-night.mjs";
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./index.css";
 
 /* ─── Types ─── */
@@ -332,56 +332,71 @@ function Badge({ children, dot }: { children: ReactNode; dot?: boolean }) {
   );
 }
 
-/* ─── Main App ─── */
+type SourceEditorPanelProps = {
+  sourceSeed: string;
+  shikiTheme: string;
+  onSourceInput: (source: string) => void;
+  onSourceCommit: (source: string) => void;
+  onApplyPreset: (preset: DiagramPreset) => void;
+};
 
-export function App() {
-  const [themeMode, setThemeMode] = useState<ThemeMode>(() => getPreferredMode());
-  const [mermaidTheme, setMermaidTheme] = useState<ThemeName>(() => MERMAID_THEME_BY_MODE[getPreferredMode()]);
-  const [renderStyle, setRenderStyle] = useState<RenderStyle>("svg");
-  const [pngScale, setPngScale] = useState<(typeof PNG_SCALES)[number]>(2);
+const SourceEditorHeader = memo(function SourceEditorHeader({
+  activePreset,
+  onPresetChange,
+  onApplyPreset,
+}: {
+  activePreset: DiagramPreset;
+  onPresetChange: (preset: DiagramPreset) => void;
+  onApplyPreset: () => void;
+}) {
+  return (
+    <PanelHeader>
+      <PanelTab icon={Code2} label="Source" />
+      <div className="flex items-center gap-2">
+        <Select value={activePreset} onValueChange={v => onPresetChange(v as DiagramPreset)}>
+          <SelectTrigger className="h-7 w-[132px] text-xs" title="Choose a preset to apply">
+            <SelectValue placeholder="Choose preset" />
+          </SelectTrigger>
+          <SelectContent>
+            {Object.keys(DIAGRAM_PRESETS).map(p => (
+              <SelectItem key={p} value={p}>{p}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 px-2.5 text-xs"
+          onClick={onApplyPreset}
+          title="Apply selected preset"
+        >
+          Apply preset
+        </Button>
+      </div>
+    </PanelHeader>
+  );
+});
+
+const SourceEditorPanel = memo(function SourceEditorPanel({
+  sourceSeed,
+  shikiTheme,
+  onSourceInput,
+  onSourceCommit,
+  onApplyPreset,
+}: SourceEditorPanelProps) {
   const [activePreset, setActivePreset] = useState<DiagramPreset>(DEFAULT_PRESET);
-  const [source, setSource] = useState<string>(DIAGRAM_PRESETS[DEFAULT_PRESET]);
+  const [source, setSource] = useState<string>(sourceSeed);
   const [sourceHighlightHtml, setSourceHighlightHtml] = useState("");
-  const [hasHydratedShareLink, setHasHydratedShareLink] = useState(false);
 
-  const [svgMarkup, setSvgMarkup] = useState("");
-  const [asciiMarkup, setAsciiMarkup] = useState("");
-  const [renderError, setRenderError] = useState("");
-  const [isRendering, setIsRendering] = useState(false);
-  const [exporting, setExporting] = useState<"svg" | "png" | null>(null);
-  const [actionMessage, setActionMessage] = useState("");
-  const [actionError, setActionError] = useState(false);
-
-  const [svgSize, setSvgSize] = useState<SvgSize | null>(null);
-  const [transform, setTransform] = useState<Transform>({ x: 0, y: 0, scale: 1 });
-
-  const viewportRef = useRef<HTMLDivElement | null>(null);
   const sourceTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const sourceHighlightContentRef = useRef<HTMLPreElement | null>(null);
-  const transformRef = useRef<Transform>(transform);
-  const dragRef = useRef<DragState | null>(null);
-  const requestIdRef = useRef<number>(0);
-  const actionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const availableThemes = useMemo(() => Object.keys(THEMES).sort() as ThemeName[], []);
-  const shikiTheme = useMemo(() => getShikiThemeName(mermaidTheme, themeMode), [mermaidTheme, themeMode]);
-
-  useEffect(() => { transformRef.current = transform; }, [transform]);
 
   useEffect(() => {
-    const root = document.documentElement;
-    root.classList.toggle("dark", themeMode === "dark");
-    root.style.colorScheme = themeMode;
-  }, [themeMode]);
-
-  useEffect(() => {
-    const modeDefaultTheme = MERMAID_THEME_BY_MODE[themeMode];
-    setMermaidTheme(current =>
-      current === MERMAID_THEME_BY_MODE.light || current === MERMAID_THEME_BY_MODE.dark
-        ? modeDefaultTheme
-        : current,
-    );
-  }, [themeMode]);
+    setSource(sourceSeed);
+    const matchedPreset = (Object.entries(DIAGRAM_PRESETS).find(([, presetSource]) => presetSource === sourceSeed)?.[0]
+      ?? DEFAULT_PRESET) as DiagramPreset;
+    setActivePreset(matchedPreset);
+  }, [sourceSeed]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -410,108 +425,150 @@ export function App() {
     };
   }, [shikiTheme, source]);
 
-  const showActionMessage = useCallback((message: string, isError = false) => {
-    setActionMessage(message);
-    setActionError(isError);
-    if (actionTimeoutRef.current) clearTimeout(actionTimeoutRef.current);
-    actionTimeoutRef.current = setTimeout(() => {
-      setActionMessage("");
-      setActionError(false);
-    }, 3000);
+  const syncSourceHighlightScroll = useCallback((scrollLeft: number, scrollTop: number) => {
+    if (!sourceHighlightContentRef.current) return;
+    sourceHighlightContentRef.current.style.transform = `translate(${-scrollLeft}px, ${-scrollTop}px)`;
   }, []);
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    let isCancelled = false;
-    (async () => {
-      try {
-        const currentUrl = new URL(window.location.href);
-        const token = readDiagramTokenFromUrl(currentUrl);
-        if (!token) return;
-        const decoded = await decodeDiagramToken(token);
-        if (isCancelled) return;
-        setSource(decoded);
-
-        const canonicalUrl = writeDiagramTokenToUrl(currentUrl, token);
-        if (canonicalUrl.toString() !== currentUrl.toString()) {
-          window.history.replaceState(null, "", canonicalUrl);
-        }
-      } catch {
-        if (!isCancelled) {
-          showActionMessage("Invalid share link", true);
-        }
-      } finally {
-        if (!isCancelled) {
-          setHasHydratedShareLink(true);
-        }
-      }
-    })();
-
-    return () => {
-      isCancelled = true;
-    };
-  }, [showActionMessage]);
+  const handleSourceEditorScroll = useCallback((event: React.UIEvent<HTMLTextAreaElement>) => {
+    syncSourceHighlightScroll(event.currentTarget.scrollLeft, event.currentTarget.scrollTop);
+  }, [syncSourceHighlightScroll]);
 
   useEffect(() => {
-    if (typeof window === "undefined" || !hasHydratedShareLink) return;
+    const editor = sourceTextareaRef.current;
+    if (!editor) return;
+    syncSourceHighlightScroll(editor.scrollLeft, editor.scrollTop);
+  }, [sourceHighlightHtml, syncSourceHighlightScroll]);
 
-    let isCancelled = false;
-    const timeout = setTimeout(() => {
-      void (async () => {
-        try {
-          const currentUrl = new URL(window.location.href);
-          const nextUrl = await buildShareUrlForSource(source, currentUrl);
-          if (!isCancelled && nextUrl.toString() !== currentUrl.toString()) {
-            window.history.replaceState(null, "", nextUrl);
-          }
-        } catch {}
-      })();
-    }, 350);
+  const applySelectedPreset = useCallback(() => {
+    const nextSource = DIAGRAM_PRESETS[activePreset];
+    setSource(nextSource);
+    onSourceInput(nextSource);
+    onSourceCommit(nextSource);
+    onApplyPreset(activePreset);
+  }, [activePreset, onApplyPreset, onSourceCommit, onSourceInput]);
 
-    return () => {
-      isCancelled = true;
-      clearTimeout(timeout);
-    };
-  }, [hasHydratedShareLink, source]);
+  const handleSourceChange = useCallback((event: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const nextSource = event.currentTarget.value;
+    setSource(nextSource);
+    onSourceInput(nextSource);
+  }, [onSourceInput]);
 
-  const getRenderOptions = useCallback(
-    () => ({ ...THEMES[mermaidTheme], font: "DM Sans", padding: 36 }),
-    [mermaidTheme],
+  const lineCount = source.split("\n").length;
+
+  return (
+    <Card className="reveal-up flex flex-col gap-0 overflow-hidden rounded-xl p-0 shadow-sm" style={{ animationDelay: "60ms" }}>
+      <SourceEditorHeader
+        activePreset={activePreset}
+        onPresetChange={setActivePreset}
+        onApplyPreset={applySelectedPreset}
+      />
+
+      <div className="relative flex flex-1" style={{ minHeight: "50vh" }}>
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 overflow-hidden px-4 py-3 font-mono text-[0.82rem] leading-relaxed"
+        >
+          {sourceHighlightHtml ? (
+            <pre
+              ref={sourceHighlightContentRef}
+              className="m-0 whitespace-pre-wrap break-words will-change-transform"
+              style={{ tabSize: 2 }}
+              dangerouslySetInnerHTML={{ __html: sourceHighlightHtml }}
+            />
+          ) : (
+            <pre
+              ref={sourceHighlightContentRef}
+              className="m-0 whitespace-pre-wrap break-words text-foreground will-change-transform"
+              style={{ tabSize: 2 }}
+            >
+              {source || " "}
+            </pre>
+          )}
+        </div>
+
+        <textarea
+          ref={sourceTextareaRef}
+          value={source}
+          onChange={handleSourceChange}
+          onScroll={handleSourceEditorScroll}
+          onBlur={() => onSourceCommit(source)}
+          spellCheck={false}
+          className="relative z-10 flex-1 resize-none border-none bg-transparent px-4 py-3 font-mono text-[0.82rem] leading-relaxed text-transparent caret-foreground outline-none selection:bg-primary/30 selection:text-foreground placeholder:text-muted-foreground"
+          style={{ minHeight: "50vh", tabSize: 2 }}
+          placeholder="Enter Mermaid diagram syntax..."
+        />
+      </div>
+
+      <div className="flex items-center justify-between gap-2 border-t border-border px-4 py-1.5 text-[0.7rem] text-muted-foreground">
+        <span>{lineCount} line{lineCount !== 1 ? "s" : ""}</span>
+        <span>flowchart, sequence, state, class, ER</span>
+      </div>
+    </Card>
   );
+});
 
-  const renderSvgSnapshot = useCallback(async () => {
-    const renderedSvg = await renderMermaid(source, getRenderOptions());
-    setSvgMarkup(renderedSvg);
-    setSvgSize(extractSvgSize(renderedSvg));
-    return renderedSvg;
-  }, [getRenderOptions, source]);
+type PreviewPanelProps = {
+  renderStyle: RenderStyle;
+  onRenderStyleChange: (style: RenderStyle) => void;
+  svgMarkup: string;
+  asciiMarkup: string;
+  renderError: string;
+  actionMessage: string;
+  actionError: boolean;
+  isBusy: boolean;
+  exporting: "svg" | "png" | null;
+  pngScale: (typeof PNG_SCALES)[number];
+  onPngScaleChange: (scale: (typeof PNG_SCALES)[number]) => void;
+  onCopySvg: () => void;
+  onCopyPng: () => void;
+  onCopyAscii: () => void;
+  onSvgDownload: () => void;
+  onPngDownload: () => void;
+};
 
-  const createPngBlobFromSvg = useCallback(async (svg: string, scale: number) => {
-    let svgUrl = "";
-    try {
-      const rawSvgBlob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
-      svgUrl = URL.createObjectURL(rawSvgBlob);
-      const image = await loadImage(svgUrl);
-      const measuredSize = extractSvgSize(svg);
-      const width = measuredSize?.width ?? image.width;
-      const height = measuredSize?.height ?? image.height;
-      if (!width || !height) throw new Error("Could not calculate PNG dimensions from rendered SVG.");
+const PreviewPanel = memo(function PreviewPanel({
+  renderStyle,
+  onRenderStyleChange,
+  svgMarkup,
+  asciiMarkup,
+  renderError,
+  actionMessage,
+  actionError,
+  isBusy,
+  exporting,
+  pngScale,
+  onPngScaleChange,
+  onCopySvg,
+  onCopyPng,
+  onCopyAscii,
+  onSvgDownload,
+  onPngDownload,
+}: PreviewPanelProps) {
+  const [svgSize, setSvgSize] = useState<SvgSize | null>(null);
+  const [transform, setTransform] = useState<Transform>({ x: 0, y: 0, scale: 1 });
 
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.max(1, Math.round(width * scale));
-      canvas.height = Math.max(1, Math.round(height * scale));
-      const context = canvas.getContext("2d");
-      if (!context) throw new Error("Could not initialize PNG canvas context.");
-      context.setTransform(scale, 0, 0, scale, 0, 0);
-      context.drawImage(image, 0, 0);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const transformRef = useRef<Transform>(transform);
+  const dragRef = useRef<DragState | null>(null);
 
-      return await new Promise<Blob>((resolve, reject) => {
-        canvas.toBlob(blob => (blob ? resolve(blob) : reject(new Error("PNG export failed."))), "image/png");
-      });
-    } finally {
-      if (svgUrl) URL.revokeObjectURL(svgUrl);
+  useEffect(() => { transformRef.current = transform; }, [transform]);
+
+  useEffect(() => {
+    if (renderStyle !== "svg" || !svgMarkup) {
+      setSvgSize(null);
+      return;
     }
+    setSvgSize(extractSvgSize(svgMarkup));
+  }, [renderStyle, svgMarkup]);
+
+  const applyZoomAroundPoint = useCallback((nextScale: number, anchorX: number, anchorY: number) => {
+    setTransform(cur => {
+      const scale = clamp(nextScale, MIN_SCALE, MAX_SCALE);
+      const wx = (anchorX - cur.x) / cur.scale;
+      const wy = (anchorY - cur.y) / cur.scale;
+      return { scale, x: anchorX - wx * scale, y: anchorY - wy * scale };
+    });
   }, []);
 
   const fitToView = useCallback(() => {
@@ -526,55 +583,6 @@ export function App() {
       y: (vp.clientHeight - svgSize.height * scale) / 2,
     });
   }, [svgSize]);
-
-  // Render effect
-  useEffect(() => {
-    const requestId = ++requestIdRef.current;
-    (async () => {
-      setIsRendering(true);
-      setRenderError("");
-      try {
-        if (renderStyle === "svg") {
-          const svg = await renderMermaid(source, getRenderOptions());
-          if (requestId !== requestIdRef.current) return;
-          setSvgMarkup(svg);
-          setAsciiMarkup("");
-          setSvgSize(extractSvgSize(svg));
-        } else {
-          const ascii = renderMermaidAscii(source, { useAscii: renderStyle === "ascii" });
-          if (requestId !== requestIdRef.current) return;
-          setAsciiMarkup(ascii);
-          setSvgMarkup("");
-          setSvgSize(null);
-        }
-      } catch (error) {
-        if (requestId !== requestIdRef.current) return;
-        setRenderError(error instanceof Error ? error.message : String(error));
-        setSvgMarkup("");
-        setAsciiMarkup("");
-        setSvgSize(null);
-      } finally {
-        if (requestId === requestIdRef.current) setIsRendering(false);
-      }
-    })();
-  }, [getRenderOptions, renderStyle, source]);
-
-  // Auto-fit on render
-  useEffect(() => {
-    if (renderStyle !== "svg" || !svgMarkup || !svgSize) return;
-    const frame = requestAnimationFrame(() => fitToView());
-    return () => cancelAnimationFrame(frame);
-  }, [fitToView, renderStyle, svgMarkup, svgSize]);
-
-  // Zoom helpers
-  const applyZoomAroundPoint = useCallback((nextScale: number, anchorX: number, anchorY: number) => {
-    setTransform(cur => {
-      const scale = clamp(nextScale, MIN_SCALE, MAX_SCALE);
-      const wx = (anchorX - cur.x) / cur.scale;
-      const wy = (anchorY - cur.y) / cur.scale;
-      return { scale, x: anchorX - wx * scale, y: anchorY - wy * scale };
-    });
-  }, []);
 
   const zoomToScale = useCallback(
     (nextScale: number) => {
@@ -593,7 +601,6 @@ export function App() {
     [zoomToScale],
   );
 
-  // Pointer / wheel handlers
   const handleWheelZoom = useCallback(
     (event: React.WheelEvent<HTMLDivElement>) => {
       event.preventDefault();
@@ -640,6 +647,369 @@ export function App() {
     }
     dragRef.current = null;
   }, []);
+
+  const isSvgReady = renderStyle === "svg" && !!svgMarkup;
+
+  return (
+    <Card className="reveal-up flex flex-col gap-0 overflow-hidden rounded-xl p-0 shadow-sm" style={{ animationDelay: "120ms" }}>
+      <PanelHeader>
+        <div className="flex items-center gap-2">
+          <PanelTab icon={Eye} label="Preview" />
+          {renderStyle !== "svg" ? <Badge>text mode</Badge> : null}
+        </div>
+      </PanelHeader>
+
+      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-muted/40 px-4 py-2">
+        <Select value={renderStyle} onValueChange={v => onRenderStyleChange(v as RenderStyle)}>
+          <SelectTrigger className="h-7 w-[145px] text-xs">
+            {renderStyle === "svg" ? (
+              <FileImage className="size-3 shrink-0 opacity-60" />
+            ) : (
+              <Terminal className="size-3 shrink-0 opacity-60" />
+            )}
+            <SelectValue placeholder="Render" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="svg">SVG (interactive)</SelectItem>
+            <SelectItem value="unicode">ASCII + Unicode</SelectItem>
+            <SelectItem value="ascii">ASCII only</SelectItem>
+          </SelectContent>
+        </Select>
+
+        <ButtonGroup>
+          <ButtonGroupItem onClick={onCopySvg} disabled={isBusy} title="Copy SVG markup">
+            <Copy className="size-3" /> SVG
+          </ButtonGroupItem>
+          <ButtonGroupItem onClick={onCopyPng} disabled={isBusy} title="Copy PNG to clipboard">
+            <Copy className="size-3" /> PNG
+          </ButtonGroupItem>
+          <ButtonGroupItem onClick={onCopyAscii} disabled={isBusy} title="Copy ASCII to clipboard">
+            <ClipboardCopy className="size-3" /> ASCII
+          </ButtonGroupItem>
+        </ButtonGroup>
+
+        <ButtonGroup>
+          <ButtonGroupItem onClick={onSvgDownload} disabled={isBusy}>
+            <Download className="size-3" /> {exporting === "svg" ? "..." : "SVG"}
+          </ButtonGroupItem>
+          <ButtonGroupItem onClick={onPngDownload} disabled={isBusy}>
+            <Download className="size-3" /> {exporting === "png" ? "..." : "PNG"}
+          </ButtonGroupItem>
+        </ButtonGroup>
+
+        <Select value={String(pngScale)} onValueChange={v => onPngScaleChange(Number(v) as (typeof PNG_SCALES)[number])}>
+          <SelectTrigger className="h-7 w-[68px] text-xs">
+            <SelectValue placeholder="Scale" />
+          </SelectTrigger>
+          <SelectContent>
+            {PNG_SCALES.map(s => (
+              <SelectItem key={s} value={String(s)}>{s}x</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        {isSvgReady ? (
+          <>
+            <div className="mx-0.5 h-4 w-px bg-border" />
+            <Button variant="ghost" size="sm" className="h-7 gap-1.5 px-2.5 text-xs" onClick={fitToView}>
+              <ScanSearch className="size-3" /> Fit
+            </Button>
+          </>
+        ) : null}
+      </div>
+
+      <div className="relative flex-1">
+        <div
+          ref={viewportRef}
+          className={cn(
+            "viewport-dots absolute inset-0 bg-muted/30",
+            isSvgReady
+              ? "overflow-hidden cursor-grab active:cursor-grabbing"
+              : "overflow-auto cursor-default",
+          )}
+          style={{ minHeight: "50vh" }}
+          onWheel={isSvgReady ? handleWheelZoom : undefined}
+          onPointerDown={isSvgReady ? handlePointerDown : undefined}
+          onPointerMove={isSvgReady ? handlePointerMove : undefined}
+          onPointerUp={isSvgReady ? handlePointerUp : undefined}
+          onPointerCancel={isSvgReady ? handlePointerUp : undefined}
+        >
+          {isSvgReady ? (
+            <div
+              className="diagram-stage"
+              style={{ transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale})` }}
+            >
+              <div className="diagram-svg" dangerouslySetInnerHTML={{ __html: svgMarkup }} />
+            </div>
+          ) : null}
+
+          {renderStyle !== "svg" && asciiMarkup ? (
+            <pre className="m-0 h-full min-h-[50vh] whitespace-pre p-5 font-mono text-[0.82rem] leading-snug">
+              {asciiMarkup}
+            </pre>
+          ) : null}
+
+          {renderError ? (
+            <p className="absolute inset-x-3 bottom-3 m-0 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm leading-snug text-destructive backdrop-blur-xl">
+              {renderError}
+            </p>
+          ) : null}
+
+          {actionMessage ? (
+            <div
+              className={cn(
+                "absolute left-1/2 top-3 z-10 flex items-center gap-1.5 whitespace-nowrap rounded-full border bg-card/80 px-3 py-1 text-xs font-medium shadow-lg backdrop-blur-xl",
+                actionError ? "border-destructive/30 text-destructive" : "border-border text-foreground",
+              )}
+              style={{ animation: "toast-in 300ms cubic-bezier(0.16, 1, 0.3, 1)", transform: "translateX(-50%)" }}
+            >
+              {!actionError ? <Check className="size-3" /> : null}
+              {actionMessage}
+            </div>
+          ) : null}
+
+          {isSvgReady ? (
+            <div
+              className="absolute bottom-3 right-3 flex items-center overflow-hidden rounded-lg border border-border bg-card/80 shadow-md backdrop-blur-xl"
+              onPointerDown={event => event.stopPropagation()}
+              onPointerMove={event => event.stopPropagation()}
+              onPointerUp={event => event.stopPropagation()}
+              onPointerCancel={event => event.stopPropagation()}
+              onWheel={event => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                className="flex size-7 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                onClick={() => zoomByFactor(0.9)}
+                title="Zoom out"
+              >
+                <Minus className="size-3" />
+              </button>
+              <button
+                type="button"
+                className="flex h-7 min-w-[3rem] items-center justify-center border-x border-border px-1 font-mono text-[0.68rem] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                onClick={() => zoomToScale(1)}
+                title="Reset zoom to 100%"
+              >
+                {Math.round(transform.scale * 100)}%
+              </button>
+              <button
+                type="button"
+                className="flex size-7 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                onClick={() => zoomByFactor(1.1)}
+                title="Zoom in"
+              >
+                <Plus className="size-3" />
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </Card>
+  );
+});
+
+/* ─── Main App ─── */
+
+export function App() {
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => getPreferredMode());
+  const [mermaidTheme, setMermaidTheme] = useState<ThemeName>(() => MERMAID_THEME_BY_MODE[getPreferredMode()]);
+  const [renderStyle, setRenderStyle] = useState<RenderStyle>("svg");
+  const [pngScale, setPngScale] = useState<(typeof PNG_SCALES)[number]>(2);
+  const [sourceSeed, setSourceSeed] = useState<string>(DIAGRAM_PRESETS[DEFAULT_PRESET]);
+  const [hasHydratedShareLink, setHasHydratedShareLink] = useState(false);
+
+  const [svgMarkup, setSvgMarkup] = useState("");
+  const [asciiMarkup, setAsciiMarkup] = useState("");
+  const [renderError, setRenderError] = useState("");
+  const [exporting, setExporting] = useState<"svg" | "png" | null>(null);
+  const [actionMessage, setActionMessage] = useState("");
+  const [actionError, setActionError] = useState(false);
+
+  const sourceRef = useRef<string>(DIAGRAM_PRESETS[DEFAULT_PRESET]);
+  const sourceCommitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requestIdRef = useRef<number>(0);
+  const actionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const availableThemes = useMemo(() => Object.keys(THEMES).sort() as ThemeName[], []);
+  const shikiTheme = useMemo(() => getShikiThemeName(mermaidTheme, themeMode), [mermaidTheme, themeMode]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle("dark", themeMode === "dark");
+    root.style.colorScheme = themeMode;
+  }, [themeMode]);
+
+  useEffect(() => {
+    const modeDefaultTheme = MERMAID_THEME_BY_MODE[themeMode];
+    setMermaidTheme(current =>
+      current === MERMAID_THEME_BY_MODE.light || current === MERMAID_THEME_BY_MODE.dark
+        ? modeDefaultTheme
+        : current,
+    );
+  }, [themeMode]);
+
+  useEffect(() => {
+    return () => {
+      if (sourceCommitTimeoutRef.current) {
+        clearTimeout(sourceCommitTimeoutRef.current);
+        sourceCommitTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  const syncShareUrlForSource = useCallback(async (nextSource: string) => {
+    if (typeof window === "undefined" || !hasHydratedShareLink) return;
+    try {
+      const currentUrl = new URL(window.location.href);
+      const nextUrl = await buildShareUrlForSource(nextSource, currentUrl);
+      if (nextUrl.toString() !== currentUrl.toString()) {
+        window.history.replaceState(null, "", nextUrl);
+      }
+    } catch {}
+  }, [hasHydratedShareLink]);
+
+  const getRenderOptions = useCallback(
+    () => ({ ...THEMES[mermaidTheme], font: "DM Sans", padding: 36 }),
+    [mermaidTheme],
+  );
+
+  const renderDiagramForSource = useCallback(
+    async (nextSource: string) => {
+      const requestId = ++requestIdRef.current;
+
+      try {
+        if (renderStyle === "svg") {
+          const svg = await renderMermaid(nextSource, getRenderOptions());
+          if (requestId !== requestIdRef.current) return;
+          setRenderError("");
+          setSvgMarkup(svg);
+          setAsciiMarkup("");
+        } else {
+          const ascii = renderMermaidAscii(nextSource, { useAscii: renderStyle === "ascii" });
+          if (requestId !== requestIdRef.current) return;
+          setRenderError("");
+          setAsciiMarkup(ascii);
+          setSvgMarkup("");
+        }
+      } catch (error) {
+        if (requestId !== requestIdRef.current) return;
+        setRenderError(error instanceof Error ? error.message : String(error));
+        setSvgMarkup("");
+        setAsciiMarkup("");
+      }
+    },
+    [getRenderOptions, renderStyle],
+  );
+
+  const handleSourceInput = useCallback((nextSource: string) => {
+    sourceRef.current = nextSource;
+    if (sourceCommitTimeoutRef.current) {
+      clearTimeout(sourceCommitTimeoutRef.current);
+    }
+    sourceCommitTimeoutRef.current = setTimeout(() => {
+      void renderDiagramForSource(nextSource);
+      void syncShareUrlForSource(nextSource);
+      sourceCommitTimeoutRef.current = null;
+    }, 120);
+  }, [renderDiagramForSource, syncShareUrlForSource]);
+
+  const commitSourceNow = useCallback((nextSource: string) => {
+    sourceRef.current = nextSource;
+    if (sourceCommitTimeoutRef.current) {
+      clearTimeout(sourceCommitTimeoutRef.current);
+      sourceCommitTimeoutRef.current = null;
+    }
+    void renderDiagramForSource(nextSource);
+    void syncShareUrlForSource(nextSource);
+  }, [renderDiagramForSource, syncShareUrlForSource]);
+
+  const showActionMessage = useCallback((message: string, isError = false) => {
+    setActionMessage(message);
+    setActionError(isError);
+    if (actionTimeoutRef.current) clearTimeout(actionTimeoutRef.current);
+    actionTimeoutRef.current = setTimeout(() => {
+      setActionMessage("");
+      setActionError(false);
+    }, 3000);
+  }, []);
+
+  const handlePresetApplied = useCallback((preset: DiagramPreset) => {
+    showActionMessage(`Applied ${preset} preset`);
+  }, [showActionMessage]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    let isCancelled = false;
+    (async () => {
+      try {
+        const currentUrl = new URL(window.location.href);
+        const token = readDiagramTokenFromUrl(currentUrl);
+        if (!token) return;
+        const decoded = await decodeDiagramToken(token);
+        if (isCancelled) return;
+        sourceRef.current = decoded;
+        setSourceSeed(decoded);
+        void renderDiagramForSource(decoded);
+
+        const canonicalUrl = writeDiagramTokenToUrl(currentUrl, token);
+        if (canonicalUrl.toString() !== currentUrl.toString()) {
+          window.history.replaceState(null, "", canonicalUrl);
+        }
+      } catch {
+        if (!isCancelled) {
+          showActionMessage("Invalid share link", true);
+        }
+      } finally {
+        if (!isCancelled) {
+          setHasHydratedShareLink(true);
+        }
+      }
+    })();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [renderDiagramForSource, showActionMessage]);
+
+  const renderSvgSnapshot = useCallback(async () => {
+    const renderedSvg = await renderMermaid(sourceRef.current, getRenderOptions());
+    setSvgMarkup(renderedSvg);
+    return renderedSvg;
+  }, [getRenderOptions]);
+
+  const createPngBlobFromSvg = useCallback(async (svg: string, scale: number) => {
+    let svgUrl = "";
+    try {
+      const rawSvgBlob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+      svgUrl = URL.createObjectURL(rawSvgBlob);
+      const image = await loadImage(svgUrl);
+      const measuredSize = extractSvgSize(svg);
+      const width = measuredSize?.width ?? image.width;
+      const height = measuredSize?.height ?? image.height;
+      if (!width || !height) throw new Error("Could not calculate PNG dimensions from rendered SVG.");
+
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(width * scale));
+      canvas.height = Math.max(1, Math.round(height * scale));
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Could not initialize PNG canvas context.");
+      context.setTransform(scale, 0, 0, scale, 0, 0);
+      context.drawImage(image, 0, 0);
+
+      return await new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob(blob => (blob ? resolve(blob) : reject(new Error("PNG export failed."))), "image/png");
+      });
+    } finally {
+      if (svgUrl) URL.revokeObjectURL(svgUrl);
+    }
+  }, []);
+
+  // Render on style/theme changes
+  useEffect(() => {
+    void renderDiagramForSource(sourceRef.current);
+  }, [renderDiagramForSource]);
 
   // Export handlers
   const handleSvgDownload = useCallback(async () => {
@@ -694,12 +1064,12 @@ export function App() {
 
   const handleCopyAscii = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(renderMermaidAscii(source, { useAscii: true }));
+      await navigator.clipboard.writeText(renderMermaidAscii(sourceRef.current, { useAscii: true }));
       showActionMessage("ASCII copied");
     } catch (error) {
       showActionMessage(error instanceof Error ? error.message : String(error), true);
     }
-  }, [showActionMessage, source]);
+  }, [showActionMessage]);
 
   const handleCopyShareLink = useCallback(async () => {
     try {
@@ -707,7 +1077,7 @@ export function App() {
         throw new Error("Share links are only available in a browser.");
       }
       const currentUrl = new URL(window.location.href);
-      const shareUrl = await buildShareUrlForSource(source, currentUrl);
+      const shareUrl = await buildShareUrlForSource(sourceRef.current, currentUrl);
       if (shareUrl.toString() !== currentUrl.toString()) {
         window.history.replaceState(null, "", shareUrl);
       }
@@ -716,31 +1086,9 @@ export function App() {
     } catch (error) {
       showActionMessage(error instanceof Error ? error.message : String(error), true);
     }
-  }, [showActionMessage, source]);
+  }, [showActionMessage]);
 
-  const applySelectedPreset = useCallback(() => {
-    setSource(DIAGRAM_PRESETS[activePreset]);
-    showActionMessage(`Applied ${activePreset} preset`);
-  }, [activePreset, showActionMessage]);
-
-  const syncSourceHighlightScroll = useCallback((scrollLeft: number, scrollTop: number) => {
-    if (!sourceHighlightContentRef.current) return;
-    sourceHighlightContentRef.current.style.transform = `translate(${-scrollLeft}px, ${-scrollTop}px)`;
-  }, []);
-
-  const handleSourceEditorScroll = useCallback((event: React.UIEvent<HTMLTextAreaElement>) => {
-    syncSourceHighlightScroll(event.currentTarget.scrollLeft, event.currentTarget.scrollTop);
-  }, [syncSourceHighlightScroll]);
-
-  useEffect(() => {
-    const editor = sourceTextareaRef.current;
-    if (!editor) return;
-    syncSourceHighlightScroll(editor.scrollLeft, editor.scrollTop);
-  }, [sourceHighlightHtml, syncSourceHighlightScroll]);
-
-  const lineCount = source.split("\n").length;
-  const isBusy = isRendering || exporting !== null;
-  const isSvgReady = renderStyle === "svg" && !!svgMarkup;
+  const isBusy = exporting !== null;
 
   return (
     <div className="relative z-10 mx-auto w-full max-w-[1680px] p-3 md:p-4 lg:px-6">
@@ -805,246 +1153,32 @@ export function App() {
 
       {/* ─── Workspace ─── */}
       <main className="grid min-h-[calc(100vh-8rem)] gap-3 lg:grid-cols-[minmax(340px,420px)_minmax(0,1fr)]">
-        {/* ─── Source Editor ─── */}
-        <Card className="reveal-up flex flex-col gap-0 overflow-hidden rounded-xl p-0 shadow-sm" style={{ animationDelay: "60ms" }}>
-          {/* Header */}
-          <PanelHeader>
-            <PanelTab icon={Code2} label="Source" />
-            <div className="flex items-center gap-2">
-              <Select value={activePreset} onValueChange={v => setActivePreset(v as DiagramPreset)}>
-                <SelectTrigger className="h-7 w-[132px] text-xs" title="Choose a preset to apply">
-                  <SelectValue placeholder="Choose preset" />
-                </SelectTrigger>
-                <SelectContent>
-                  {Object.keys(DIAGRAM_PRESETS).map(p => (
-                    <SelectItem key={p} value={p}>{p}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 px-2.5 text-xs"
-                onClick={applySelectedPreset}
-                title="Apply selected preset"
-              >
-                Apply preset
-              </Button>
-            </div>
-          </PanelHeader>
+        <SourceEditorPanel
+          sourceSeed={sourceSeed}
+          shikiTheme={shikiTheme}
+          onSourceInput={handleSourceInput}
+          onSourceCommit={commitSourceNow}
+          onApplyPreset={handlePresetApplied}
+        />
 
-          {/* Editor */}
-          <div className="relative flex flex-1" style={{ minHeight: "50vh" }}>
-            <div
-              aria-hidden
-              className="pointer-events-none absolute inset-0 overflow-hidden px-4 py-3 font-mono text-[0.82rem] leading-relaxed"
-            >
-              {sourceHighlightHtml ? (
-                <pre
-                  ref={sourceHighlightContentRef}
-                  className="m-0 whitespace-pre-wrap break-words will-change-transform"
-                  style={{ tabSize: 2 }}
-                  dangerouslySetInnerHTML={{ __html: sourceHighlightHtml }}
-                />
-              ) : (
-                <pre
-                  ref={sourceHighlightContentRef}
-                  className="m-0 whitespace-pre-wrap break-words text-foreground will-change-transform"
-                  style={{ tabSize: 2 }}
-                >
-                  {source || " "}
-                </pre>
-              )}
-            </div>
-
-            <textarea
-              ref={sourceTextareaRef}
-              value={source}
-              onChange={e => setSource(e.target.value)}
-              onScroll={handleSourceEditorScroll}
-              spellCheck={false}
-              className="relative z-10 flex-1 resize-none border-none bg-transparent px-4 py-3 font-mono text-[0.82rem] leading-relaxed text-transparent caret-foreground outline-none selection:bg-primary/30 selection:text-foreground placeholder:text-muted-foreground"
-              style={{ minHeight: "50vh", tabSize: 2 }}
-              placeholder="Enter Mermaid diagram syntax..."
-            />
-          </div>
-
-          {/* Footer */}
-          <div className="flex items-center justify-between gap-2 border-t border-border px-4 py-1.5 text-[0.7rem] text-muted-foreground">
-            <span>{lineCount} line{lineCount !== 1 ? "s" : ""}</span>
-            <span>flowchart, sequence, state, class, ER</span>
-          </div>
-        </Card>
-
-        {/* ─── Preview ─── */}
-        <Card className="reveal-up flex flex-col gap-0 overflow-hidden rounded-xl p-0 shadow-sm" style={{ animationDelay: "120ms" }}>
-          {/* Header */}
-          <PanelHeader>
-            <div className="flex items-center gap-2">
-              <PanelTab icon={Eye} label="Preview" />
-              {renderStyle !== "svg" && <Badge>text mode</Badge>}
-            </div>
-          </PanelHeader>
-
-          {/* Toolbar */}
-          <div className="flex flex-wrap items-center gap-2 border-b border-border bg-muted/40 px-4 py-2">
-            <Select value={renderStyle} onValueChange={v => setRenderStyle(v as RenderStyle)}>
-              <SelectTrigger className="h-7 w-[145px] text-xs">
-                {renderStyle === "svg" ? (
-                  <FileImage className="size-3 shrink-0 opacity-60" />
-                ) : (
-                  <Terminal className="size-3 shrink-0 opacity-60" />
-                )}
-                <SelectValue placeholder="Render" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="svg">SVG (interactive)</SelectItem>
-                <SelectItem value="unicode">ASCII + Unicode</SelectItem>
-                <SelectItem value="ascii">ASCII only</SelectItem>
-              </SelectContent>
-            </Select>
-
-            {/* Copy group */}
-            <ButtonGroup>
-              <ButtonGroupItem onClick={handleCopySvg} disabled={isBusy} title="Copy SVG markup">
-                <Copy className="size-3" /> SVG
-              </ButtonGroupItem>
-              <ButtonGroupItem onClick={handleCopyPng} disabled={isBusy} title="Copy PNG to clipboard">
-                <Copy className="size-3" /> PNG
-              </ButtonGroupItem>
-              <ButtonGroupItem onClick={handleCopyAscii} disabled={isBusy} title="Copy ASCII to clipboard">
-                <ClipboardCopy className="size-3" /> ASCII
-              </ButtonGroupItem>
-            </ButtonGroup>
-
-            {/* Download group */}
-            <ButtonGroup>
-              <ButtonGroupItem onClick={handleSvgDownload} disabled={isBusy}>
-                <Download className="size-3" /> {exporting === "svg" ? "..." : "SVG"}
-              </ButtonGroupItem>
-              <ButtonGroupItem onClick={handlePngDownload} disabled={isBusy}>
-                <Download className="size-3" /> {exporting === "png" ? "..." : "PNG"}
-              </ButtonGroupItem>
-            </ButtonGroup>
-
-            <Select value={String(pngScale)} onValueChange={v => setPngScale(Number(v) as (typeof PNG_SCALES)[number])}>
-              <SelectTrigger className="h-7 w-[68px] text-xs">
-                <SelectValue placeholder="Scale" />
-              </SelectTrigger>
-              <SelectContent>
-                {PNG_SCALES.map(s => (
-                  <SelectItem key={s} value={String(s)}>{s}x</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            {isSvgReady && (
-              <>
-                <div className="mx-0.5 h-4 w-px bg-border" />
-                <Button variant="ghost" size="sm" className="h-7 gap-1.5 px-2.5 text-xs" onClick={fitToView}>
-                  <ScanSearch className="size-3" /> Fit
-                </Button>
-              </>
-            )}
-          </div>
-
-          {/* Viewport */}
-          <div className="relative flex-1">
-            <div
-              ref={viewportRef}
-              className={cn(
-                "viewport-dots absolute inset-0 bg-muted/30",
-                isSvgReady
-                  ? "overflow-hidden cursor-grab active:cursor-grabbing"
-                  : "overflow-auto cursor-default",
-              )}
-              style={{ minHeight: "50vh" }}
-              onWheel={isSvgReady ? handleWheelZoom : undefined}
-              onPointerDown={isSvgReady ? handlePointerDown : undefined}
-              onPointerMove={isSvgReady ? handlePointerMove : undefined}
-              onPointerUp={isSvgReady ? handlePointerUp : undefined}
-              onPointerCancel={isSvgReady ? handlePointerUp : undefined}
-            >
-              {isSvgReady && (
-                <div
-                  className="diagram-stage"
-                  style={{ transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale})` }}
-                >
-                  <div className="diagram-svg" dangerouslySetInnerHTML={{ __html: svgMarkup }} />
-                </div>
-              )}
-
-              {renderStyle !== "svg" && asciiMarkup && (
-                <pre className="m-0 h-full min-h-[50vh] whitespace-pre p-5 font-mono text-[0.82rem] leading-snug">
-                  {asciiMarkup}
-                </pre>
-              )}
-
-              {isRendering && (
-                <div className="absolute right-3 top-3 flex items-center gap-1.5 rounded-full border border-border bg-card/80 px-3 py-1 text-[0.68rem] font-medium uppercase tracking-wide text-muted-foreground backdrop-blur-xl">
-                  <span className="size-1.5 rounded-full bg-primary" style={{ animation: "pulse-dot 1.2s ease-in-out infinite" }} />
-                  Rendering
-                </div>
-              )}
-
-              {renderError && (
-                <p className="absolute inset-x-3 bottom-3 m-0 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm leading-snug text-destructive backdrop-blur-xl">
-                  {renderError}
-                </p>
-              )}
-
-              {actionMessage && (
-                <div
-                  className={cn(
-                    "absolute left-1/2 top-3 z-10 flex items-center gap-1.5 whitespace-nowrap rounded-full border bg-card/80 px-3 py-1 text-xs font-medium shadow-lg backdrop-blur-xl",
-                    actionError ? "border-destructive/30 text-destructive" : "border-border text-foreground",
-                  )}
-                  style={{ animation: "toast-in 300ms cubic-bezier(0.16, 1, 0.3, 1)", transform: "translateX(-50%)" }}
-                >
-                  {!actionError && <Check className="size-3" />}
-                  {actionMessage}
-                </div>
-              )}
-
-              {/* Zoom controls */}
-              {isSvgReady && (
-                <div
-                  className="absolute bottom-3 right-3 flex items-center overflow-hidden rounded-lg border border-border bg-card/80 shadow-md backdrop-blur-xl"
-                  onPointerDown={event => event.stopPropagation()}
-                  onPointerMove={event => event.stopPropagation()}
-                  onPointerUp={event => event.stopPropagation()}
-                  onPointerCancel={event => event.stopPropagation()}
-                  onWheel={event => event.stopPropagation()}
-                >
-                  <button
-                    type="button"
-                    className="flex size-7 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                    onClick={() => zoomByFactor(0.9)}
-                    title="Zoom out"
-                  >
-                    <Minus className="size-3" />
-                  </button>
-                  <button
-                    type="button"
-                    className="flex h-7 min-w-[3rem] items-center justify-center border-x border-border px-1 font-mono text-[0.68rem] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                    onClick={() => zoomToScale(1)}
-                    title="Reset zoom to 100%"
-                  >
-                    {Math.round(transform.scale * 100)}%
-                  </button>
-                  <button
-                    type="button"
-                    className="flex size-7 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                    onClick={() => zoomByFactor(1.1)}
-                    title="Zoom in"
-                  >
-                    <Plus className="size-3" />
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-        </Card>
+        <PreviewPanel
+          renderStyle={renderStyle}
+          onRenderStyleChange={setRenderStyle}
+          svgMarkup={svgMarkup}
+          asciiMarkup={asciiMarkup}
+          renderError={renderError}
+          actionMessage={actionMessage}
+          actionError={actionError}
+          isBusy={isBusy}
+          exporting={exporting}
+          pngScale={pngScale}
+          onPngScaleChange={setPngScale}
+          onCopySvg={handleCopySvg}
+          onCopyPng={handleCopyPng}
+          onCopyAscii={handleCopyAscii}
+          onSvgDownload={handleSvgDownload}
+          onPngDownload={handlePngDownload}
+        />
       </main>
     </div>
   );
