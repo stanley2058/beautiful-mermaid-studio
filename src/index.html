@@ -3,11 +3,56 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Use Mermaid Studio live editor to write Mermaid syntax, preview diagrams, and export SVG or PNG instantly."
+    />
+    <meta name="robots" content="index,follow,max-image-preview:large" />
+    <link
+      rel="canonical"
+      href="https://stanley2058.github.io/beautiful-mermaid-studio/"
+    />
     <link rel="icon" type="image/svg+xml" href="./logo.svg" />
-    <title>Beautiful Mermaid Studio</title>
+    <meta property="og:title" content="Mermaid Studio" />
+    <meta
+      property="og:description"
+      content="Edit Mermaid diagrams online with live preview and export controls."
+    />
+    <meta property="og:type" content="website" />
+    <meta
+      property="og:url"
+      content="https://stanley2058.github.io/beautiful-mermaid-studio/"
+    />
+    <meta
+      property="og:image"
+      content="https://stanley2058.github.io/beautiful-mermaid-studio/og-image.jpg"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Mermaid Studio" />
+    <meta
+      name="twitter:description"
+      content="Write Mermaid syntax and preview/export diagrams instantly."
+    />
+    <meta
+      name="twitter:image"
+      content="https://stanley2058.github.io/beautiful-mermaid-studio/og-image.jpg"
+    />
+    <title>Mermaid Studio</title>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Mermaid Studio",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Web",
+        "url": "https://stanley2058.github.io/beautiful-mermaid-studio/app.html",
+        "description": "Live Mermaid editor with instant preview, theme controls, and export options."
+      }
+    </script>
     <script type="module" src="./frontend.tsx" async></script>
   </head>
   <body>
+    <noscript>Mermaid Studio requires JavaScript.</noscript>
     <div id="root"></div>
   </body>
 </html>
