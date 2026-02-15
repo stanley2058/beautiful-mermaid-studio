@@ -32,5 +32,5 @@
     "noPropertyAccessFromIndexSignature": false
   },
 
-  "exclude": ["dist", "node_modules", "build.ts"]
+  "exclude": ["dist", "node_modules", "build.ts", "bun-plugin-react-compiler.ts"]
 }
