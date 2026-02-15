@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   clearDiagramTokenFromUrl,
@@ -27,6 +27,19 @@ import {
   SunMedium,
   Terminal,
 } from "lucide-react";
+import { createHighlighterCore } from "shiki/core";
+import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
+import langMermaid from "shiki/langs/mermaid.mjs";
+import themeCatppuccinLatte from "shiki/themes/catppuccin-latte.mjs";
+import themeCatppuccinMocha from "shiki/themes/catppuccin-mocha.mjs";
+import themeDracula from "shiki/themes/dracula.mjs";
+import themeGithubDark from "shiki/themes/github-dark.mjs";
+import themeGithubLight from "shiki/themes/github-light.mjs";
+import themeNord from "shiki/themes/nord.mjs";
+import themeOneDarkPro from "shiki/themes/one-dark-pro.mjs";
+import themeSolarizedDark from "shiki/themes/solarized-dark.mjs";
+import themeSolarizedLight from "shiki/themes/solarized-light.mjs";
+import themeTokyoNight from "shiki/themes/tokyo-night.mjs";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./index.css";
 
@@ -114,6 +127,82 @@ const DIAGRAM_PRESETS = {
 type DiagramPreset = keyof typeof DIAGRAM_PRESETS;
 const DEFAULT_PRESET: DiagramPreset = "Flowchart";
 const PRESET_SOURCES = new Set<string>(Object.values(DIAGRAM_PRESETS));
+const SHIKI_FALLBACK_THEME_BY_MODE = { light: "github-light", dark: "github-dark" } as const;
+const SHIKI_THEME_BY_MERMAID_THEME = {
+  "catppuccin-latte": { light: "catppuccin-latte", dark: "catppuccin-mocha" },
+  "catppuccin-mocha": { light: "catppuccin-latte", dark: "catppuccin-mocha" },
+  dracula: "dracula",
+  "github-dark": { light: "github-light", dark: "github-dark" },
+  "github-light": { light: "github-light", dark: "github-dark" },
+  nord: "nord",
+  "nord-light": "nord",
+  "one-dark": "one-dark-pro",
+  "solarized-dark": { light: "solarized-light", dark: "solarized-dark" },
+  "solarized-light": { light: "solarized-light", dark: "solarized-dark" },
+  "tokyo-night": "tokyo-night",
+  "tokyo-night-light": "tokyo-night",
+  "tokyo-night-storm": "tokyo-night",
+  "zinc-dark": { light: "github-light", dark: "github-dark" },
+} as const satisfies Partial<Record<ThemeName, string | Record<ThemeMode, string>>>;
+
+let globalShikiHighlighterPromise: Promise<Awaited<ReturnType<typeof createHighlighterCore>>> | null = null;
+
+function getShikiThemeName(theme: ThemeName, mode: ThemeMode): string {
+  const mappedTheme = SHIKI_THEME_BY_MERMAID_THEME[theme as keyof typeof SHIKI_THEME_BY_MERMAID_THEME];
+  if (!mappedTheme) return SHIKI_FALLBACK_THEME_BY_MODE[mode];
+  return typeof mappedTheme === "string" ? mappedTheme : mappedTheme[mode];
+}
+
+function getGlobalShikiHighlighter() {
+  if (!globalShikiHighlighterPromise) {
+    globalShikiHighlighterPromise = createHighlighterCore({
+      themes: [
+        themeCatppuccinLatte,
+        themeCatppuccinMocha,
+        themeDracula,
+        themeGithubDark,
+        themeGithubLight,
+        themeNord,
+        themeOneDarkPro,
+        themeSolarizedDark,
+        themeSolarizedLight,
+        themeTokyoNight,
+      ],
+      langs: [langMermaid],
+      engine: createJavaScriptRegexEngine(),
+    });
+  }
+  return globalShikiHighlighterPromise;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function renderShikiTokenLines(
+  lines: Array<Array<{ content: string; color?: string | undefined; fontStyle?: number | undefined }>>,
+  fallbackColor: string,
+): string {
+  return lines
+    .map(line => {
+      if (line.length === 0) return " ";
+      return line
+        .map(token => {
+          const styles = [`color:${token.color ?? fallbackColor}`];
+          if ((token.fontStyle ?? 0) & 1) styles.push("font-style:italic");
+          if ((token.fontStyle ?? 0) & 2) styles.push("font-weight:700");
+          if ((token.fontStyle ?? 0) & 4) styles.push("text-decoration:underline");
+          return `<span style=\"${styles.join(";")}\">${escapeHtml(token.content)}</span>`;
+        })
+        .join("");
+    })
+    .join("\n");
+}
 
 async function buildShareUrlForSource(source: string, currentUrl: URL): Promise<URL> {
   if (source.trim().length === 0 || PRESET_SOURCES.has(source)) {
@@ -252,6 +341,7 @@ export function App() {
   const [pngScale, setPngScale] = useState<(typeof PNG_SCALES)[number]>(2);
   const [activePreset, setActivePreset] = useState<DiagramPreset>(DEFAULT_PRESET);
   const [source, setSource] = useState<string>(DIAGRAM_PRESETS[DEFAULT_PRESET]);
+  const [sourceHighlightHtml, setSourceHighlightHtml] = useState("");
   const [hasHydratedShareLink, setHasHydratedShareLink] = useState(false);
 
   const [svgMarkup, setSvgMarkup] = useState("");
@@ -266,12 +356,15 @@ export function App() {
   const [transform, setTransform] = useState<Transform>({ x: 0, y: 0, scale: 1 });
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const sourceTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const sourceHighlightContentRef = useRef<HTMLPreElement | null>(null);
   const transformRef = useRef<Transform>(transform);
   const dragRef = useRef<DragState | null>(null);
   const requestIdRef = useRef<number>(0);
   const actionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const availableThemes = useMemo(() => Object.keys(THEMES).sort() as ThemeName[], []);
+  const shikiTheme = useMemo(() => getShikiThemeName(mermaidTheme, themeMode), [mermaidTheme, themeMode]);
 
   useEffect(() => { transformRef.current = transform; }, [transform]);
 
@@ -289,6 +382,33 @@ export function App() {
         : current,
     );
   }, [themeMode]);
+
+  useEffect(() => {
+    let isCancelled = false;
+    void (async () => {
+      try {
+        const highlighter = await getGlobalShikiHighlighter();
+        const fencedSource = `\`\`\`mermaid\n${source || " "}\n\`\`\``;
+        const tokenResult = highlighter.codeToTokens(fencedSource, {
+          lang: "mermaid",
+          theme: shikiTheme,
+        });
+        const contentLines = tokenResult.tokens.slice(1, -1);
+        const html = renderShikiTokenLines(contentLines, tokenResult.fg);
+        if (!isCancelled) {
+          setSourceHighlightHtml(html);
+        }
+      } catch {
+        if (!isCancelled) {
+          setSourceHighlightHtml("");
+        }
+      }
+    })();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [shikiTheme, source]);
 
   const showActionMessage = useCallback((message: string, isError = false) => {
     setActionMessage(message);
@@ -456,15 +576,21 @@ export function App() {
     });
   }, []);
 
-  const zoomByFactor = useCallback(
-    (factor: number) => {
+  const zoomToScale = useCallback(
+    (nextScale: number) => {
       if (!viewportRef.current) return;
-      const cur = transformRef.current;
       const cx = viewportRef.current.clientWidth / 2;
       const cy = viewportRef.current.clientHeight / 2;
-      applyZoomAroundPoint(cur.scale * factor, cx, cy);
+      applyZoomAroundPoint(nextScale, cx, cy);
     },
     [applyZoomAroundPoint],
+  );
+
+  const zoomByFactor = useCallback(
+    (factor: number) => {
+      zoomToScale(transformRef.current.scale * factor);
+    },
+    [zoomToScale],
   );
 
   // Pointer / wheel handlers
@@ -592,6 +718,26 @@ export function App() {
     }
   }, [showActionMessage, source]);
 
+  const applySelectedPreset = useCallback(() => {
+    setSource(DIAGRAM_PRESETS[activePreset]);
+    showActionMessage(`Applied ${activePreset} preset`);
+  }, [activePreset, showActionMessage]);
+
+  const syncSourceHighlightScroll = useCallback((scrollLeft: number, scrollTop: number) => {
+    if (!sourceHighlightContentRef.current) return;
+    sourceHighlightContentRef.current.style.transform = `translate(${-scrollLeft}px, ${-scrollTop}px)`;
+  }, []);
+
+  const handleSourceEditorScroll = useCallback((event: React.UIEvent<HTMLTextAreaElement>) => {
+    syncSourceHighlightScroll(event.currentTarget.scrollLeft, event.currentTarget.scrollTop);
+  }, [syncSourceHighlightScroll]);
+
+  useEffect(() => {
+    const editor = sourceTextareaRef.current;
+    if (!editor) return;
+    syncSourceHighlightScroll(editor.scrollLeft, editor.scrollTop);
+  }, [sourceHighlightHtml, syncSourceHighlightScroll]);
+
   const lineCount = source.split("\n").length;
   const isBusy = isRendering || exporting !== null;
   const isSvgReady = renderStyle === "svg" && !!svgMarkup;
@@ -664,51 +810,60 @@ export function App() {
           {/* Header */}
           <PanelHeader>
             <PanelTab icon={Code2} label="Source" />
-            <Select
-              value={activePreset}
-              onValueChange={v => {
-                const p = v as DiagramPreset;
-                setActivePreset(p);
-                setSource(DIAGRAM_PRESETS[p]);
-              }}
-            >
-              <SelectTrigger className="h-7 w-[120px] text-xs">
-                <SelectValue placeholder="Preset" />
-              </SelectTrigger>
-              <SelectContent>
-                {Object.keys(DIAGRAM_PRESETS).map(p => (
-                  <SelectItem key={p} value={p}>{p}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <div className="flex items-center gap-2">
+              <Select value={activePreset} onValueChange={v => setActivePreset(v as DiagramPreset)}>
+                <SelectTrigger className="h-7 w-[132px] text-xs" title="Choose a preset to apply">
+                  <SelectValue placeholder="Choose preset" />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.keys(DIAGRAM_PRESETS).map(p => (
+                    <SelectItem key={p} value={p}>{p}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-2.5 text-xs"
+                onClick={applySelectedPreset}
+                title="Apply selected preset"
+              >
+                Apply preset
+              </Button>
+            </div>
           </PanelHeader>
 
-          {/* Controls bar */}
-          <div className="flex flex-wrap items-center gap-2 border-b border-border bg-muted/40 px-4 py-2">
-            <Select value={renderStyle} onValueChange={v => setRenderStyle(v as RenderStyle)}>
-              <SelectTrigger className="h-7 w-[145px] text-xs">
-                {renderStyle === "svg" ? (
-                  <FileImage className="size-3 shrink-0 opacity-60" />
-                ) : (
-                  <Terminal className="size-3 shrink-0 opacity-60" />
-                )}
-                <SelectValue placeholder="Render" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="svg">SVG (interactive)</SelectItem>
-                <SelectItem value="unicode">ASCII + Unicode</SelectItem>
-                <SelectItem value="ascii">ASCII only</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
           {/* Editor */}
-          <div className="flex flex-1 flex-col">
+          <div className="relative flex flex-1" style={{ minHeight: "50vh" }}>
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-0 overflow-hidden px-4 py-3 font-mono text-[0.82rem] leading-relaxed"
+            >
+              {sourceHighlightHtml ? (
+                <pre
+                  ref={sourceHighlightContentRef}
+                  className="m-0 whitespace-pre-wrap break-words will-change-transform"
+                  style={{ tabSize: 2 }}
+                  dangerouslySetInnerHTML={{ __html: sourceHighlightHtml }}
+                />
+              ) : (
+                <pre
+                  ref={sourceHighlightContentRef}
+                  className="m-0 whitespace-pre-wrap break-words text-foreground will-change-transform"
+                  style={{ tabSize: 2 }}
+                >
+                  {source || " "}
+                </pre>
+              )}
+            </div>
+
             <textarea
+              ref={sourceTextareaRef}
               value={source}
               onChange={e => setSource(e.target.value)}
+              onScroll={handleSourceEditorScroll}
               spellCheck={false}
-              className="flex-1 resize-none border-none bg-transparent px-4 py-3 font-mono text-[0.82rem] leading-relaxed text-foreground outline-none placeholder:text-muted-foreground"
+              className="relative z-10 flex-1 resize-none border-none bg-transparent px-4 py-3 font-mono text-[0.82rem] leading-relaxed text-transparent caret-foreground outline-none selection:bg-primary/30 selection:text-foreground placeholder:text-muted-foreground"
               style={{ minHeight: "50vh", tabSize: 2 }}
               placeholder="Enter Mermaid diagram syntax..."
             />
@@ -733,6 +888,22 @@ export function App() {
 
           {/* Toolbar */}
           <div className="flex flex-wrap items-center gap-2 border-b border-border bg-muted/40 px-4 py-2">
+            <Select value={renderStyle} onValueChange={v => setRenderStyle(v as RenderStyle)}>
+              <SelectTrigger className="h-7 w-[145px] text-xs">
+                {renderStyle === "svg" ? (
+                  <FileImage className="size-3 shrink-0 opacity-60" />
+                ) : (
+                  <Terminal className="size-3 shrink-0 opacity-60" />
+                )}
+                <SelectValue placeholder="Render" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="svg">SVG (interactive)</SelectItem>
+                <SelectItem value="unicode">ASCII + Unicode</SelectItem>
+                <SelectItem value="ascii">ASCII only</SelectItem>
+              </SelectContent>
+            </Select>
+
             {/* Copy group */}
             <ButtonGroup>
               <ButtonGroupItem onClick={handleCopySvg} disabled={isBusy} title="Copy SVG markup">
@@ -782,8 +953,10 @@ export function App() {
             <div
               ref={viewportRef}
               className={cn(
-                "viewport-dots absolute inset-0 overflow-hidden bg-muted/30",
-                isSvgReady ? "cursor-grab active:cursor-grabbing" : "cursor-default",
+                "viewport-dots absolute inset-0 bg-muted/30",
+                isSvgReady
+                  ? "overflow-hidden cursor-grab active:cursor-grabbing"
+                  : "overflow-auto cursor-default",
               )}
               style={{ minHeight: "50vh" }}
               onWheel={isSvgReady ? handleWheelZoom : undefined}
@@ -802,7 +975,7 @@ export function App() {
               )}
 
               {renderStyle !== "svg" && asciiMarkup && (
-                <pre className="m-0 min-h-[50vh] overflow-auto whitespace-pre p-5 font-mono text-[0.82rem] leading-snug">
+                <pre className="m-0 h-full min-h-[50vh] whitespace-pre p-5 font-mono text-[0.82rem] leading-snug">
                   {asciiMarkup}
                 </pre>
               )}
@@ -835,7 +1008,14 @@ export function App() {
 
               {/* Zoom controls */}
               {isSvgReady && (
-                <div className="absolute bottom-3 right-3 flex items-center overflow-hidden rounded-lg border border-border bg-card/80 shadow-md backdrop-blur-xl">
+                <div
+                  className="absolute bottom-3 right-3 flex items-center overflow-hidden rounded-lg border border-border bg-card/80 shadow-md backdrop-blur-xl"
+                  onPointerDown={event => event.stopPropagation()}
+                  onPointerMove={event => event.stopPropagation()}
+                  onPointerUp={event => event.stopPropagation()}
+                  onPointerCancel={event => event.stopPropagation()}
+                  onWheel={event => event.stopPropagation()}
+                >
                   <button
                     type="button"
                     className="flex size-7 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
@@ -844,9 +1024,14 @@ export function App() {
                   >
                     <Minus className="size-3" />
                   </button>
-                  <span className="flex h-7 min-w-[3rem] items-center justify-center border-x border-border font-mono text-[0.68rem] font-medium text-muted-foreground">
+                  <button
+                    type="button"
+                    className="flex h-7 min-w-[3rem] items-center justify-center border-x border-border px-1 font-mono text-[0.68rem] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    onClick={() => zoomToScale(1)}
+                    title="Reset zoom to 100%"
+                  >
                     {Math.round(transform.scale * 100)}%
-                  </span>
+                  </button>
                   <button
                     type="button"
                     className="flex size-7 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
