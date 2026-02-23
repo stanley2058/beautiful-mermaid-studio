@@ -9,7 +9,7 @@ import {
   writeDiagramTokenToUrl,
 } from "@/lib/share-link";
 import { cn } from "@/lib/utils";
-import { THEMES, renderMermaid, renderMermaidAscii, type ThemeName } from "beautiful-mermaid";
+import { THEMES, renderMermaidSVGAsync, renderMermaidASCII, type ThemeName } from "beautiful-mermaid";
 import {
   Check,
   ClipboardCopy,
@@ -223,6 +223,35 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function parseHexColor(value: string): { r: number; g: number; b: number } | null {
+  const normalized = value.trim().replace(/^#/, "");
+  if (normalized.length === 3) {
+    const r = Number.parseInt(normalized[0]! + normalized[0]!, 16);
+    const g = Number.parseInt(normalized[1]! + normalized[1]!, 16);
+    const b = Number.parseInt(normalized[2]! + normalized[2]!, 16);
+    return Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b) ? null : { r, g, b };
+  }
+  if (normalized.length === 6) {
+    const r = Number.parseInt(normalized.slice(0, 2), 16);
+    const g = Number.parseInt(normalized.slice(2, 4), 16);
+    const b = Number.parseInt(normalized.slice(4, 6), 16);
+    return Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b) ? null : { r, g, b };
+  }
+  return null;
+}
+
+function mixHexColors(foreground: string, background: string, foregroundPercent: number): string {
+  const fg = parseHexColor(foreground);
+  const bg = parseHexColor(background);
+  if (!fg || !bg) return foreground;
+  const weight = clamp(foregroundPercent, 0, 100) / 100;
+  const mixChannel = (a: number, b: number) => Math.round(a * weight + b * (1 - weight));
+  const r = mixChannel(fg.r, bg.r);
+  const g = mixChannel(fg.g, bg.g);
+  const b = mixChannel(fg.b, bg.b);
+  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+}
+
 function extractSvgSize(svgMarkup: string): SvgSize | null {
   if (typeof DOMParser === "undefined") return null;
   const doc = new DOMParser().parseFromString(svgMarkup, "image/svg+xml");
@@ -320,7 +349,7 @@ function PanelTab({ icon: Icon, label }: { icon: React.ComponentType<{ className
 
 function Badge({ children, dot }: { children: ReactNode; dot?: boolean }) {
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted px-2.5 py-0.5 font-mono text-[0.68rem] font-medium text-muted-foreground">
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted px-2.5 py-0.5 font-mono text-[0.68rem] font-medium text-muted-foreground h-5">
       {dot && (
         <span
           className="size-1.5 rounded-full bg-primary"
@@ -409,7 +438,7 @@ const SourceEditorPanel = memo(function SourceEditorPanel({
           theme: shikiTheme,
         });
         const contentLines = tokenResult.tokens.slice(1, -1);
-        const html = renderShikiTokenLines(contentLines, tokenResult.fg);
+        const html = renderShikiTokenLines(contentLines, tokenResult.fg ?? "#fff");
         if (!isCancelled) {
           setSourceHighlightHtml(html);
         }
@@ -584,6 +613,16 @@ const PreviewPanel = memo(function PreviewPanel({
     });
   }, [svgSize]);
 
+  useEffect(() => {
+    if (renderStyle !== "svg" || !svgSize || typeof window === "undefined") return;
+    const frame = window.requestAnimationFrame(() => {
+      fitToView();
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [fitToView, renderStyle, svgSize]);
+
   const zoomToScale = useCallback(
     (nextScale: number) => {
       if (!viewportRef.current) return;
@@ -744,9 +783,10 @@ const PreviewPanel = memo(function PreviewPanel({
           ) : null}
 
           {renderStyle !== "svg" && asciiMarkup ? (
-            <pre className="m-0 h-full min-h-[50vh] whitespace-pre p-5 font-mono text-[0.82rem] leading-snug">
-              {asciiMarkup}
-            </pre>
+            <pre
+              className="m-0 h-full min-h-[50vh] whitespace-pre p-5 font-mono text-[0.82rem] leading-snug"
+              dangerouslySetInnerHTML={{ __html: asciiMarkup }}
+            />
           ) : null}
 
           {renderError ? (
@@ -833,6 +873,19 @@ export function App() {
 
   const availableThemes = useMemo(() => Object.keys(THEMES).sort() as ThemeName[], []);
   const shikiTheme = useMemo(() => getShikiThemeName(mermaidTheme, themeMode), [mermaidTheme, themeMode]);
+  const asciiTheme = useMemo(() => {
+    const colors = THEMES[mermaidTheme];
+    const line = colors.line ?? mixHexColors(colors.fg, colors.bg, 50);
+    const border = colors.border ?? mixHexColors(colors.fg, colors.bg, 20);
+    return {
+      fg: colors.fg,
+      border,
+      line,
+      arrow: colors.accent ?? mixHexColors(colors.fg, colors.bg, 85),
+      corner: line,
+      junction: border,
+    };
+  }, [mermaidTheme]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -880,13 +933,17 @@ export function App() {
 
       try {
         if (renderStyle === "svg") {
-          const svg = await renderMermaid(nextSource, getRenderOptions());
+          const svg = await renderMermaidSVGAsync(nextSource, getRenderOptions());
           if (requestId !== requestIdRef.current) return;
           setRenderError("");
           setSvgMarkup(svg);
           setAsciiMarkup("");
         } else {
-          const ascii = renderMermaidAscii(nextSource, { useAscii: renderStyle === "ascii" });
+          const ascii = renderMermaidASCII(nextSource, {
+            useAscii: renderStyle === "ascii",
+            colorMode: "html",
+            theme: asciiTheme,
+          });
           if (requestId !== requestIdRef.current) return;
           setRenderError("");
           setAsciiMarkup(ascii);
@@ -899,7 +956,7 @@ export function App() {
         setAsciiMarkup("");
       }
     },
-    [getRenderOptions, renderStyle],
+    [asciiTheme, getRenderOptions, renderStyle],
   );
 
   const handleSourceInput = useCallback((nextSource: string) => {
@@ -974,7 +1031,7 @@ export function App() {
   }, [renderDiagramForSource, showActionMessage]);
 
   const renderSvgSnapshot = useCallback(async () => {
-    const renderedSvg = await renderMermaid(sourceRef.current, getRenderOptions());
+    const renderedSvg = await renderMermaidSVGAsync(sourceRef.current, getRenderOptions());
     setSvgMarkup(renderedSvg);
     return renderedSvg;
   }, [getRenderOptions]);
@@ -1064,7 +1121,10 @@ export function App() {
 
   const handleCopyAscii = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(renderMermaidAscii(sourceRef.current, { useAscii: true }));
+      await navigator.clipboard.writeText(renderMermaidASCII(sourceRef.current, {
+        useAscii: true,
+        colorMode: "none",
+      }));
       showActionMessage("ASCII copied");
     } catch (error) {
       showActionMessage(error instanceof Error ? error.message : String(error), true);
